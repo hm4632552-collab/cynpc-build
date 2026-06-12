@@ -1,0 +1,106 @@
+name: Build CyNPC for Android
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    # ── 1. تحميل الكود ──────────────────────────────────────────
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    # ── 2. تحميل llama.cpp ──────────────────────────────────────
+    - name: Clone llama.cpp
+      run: |
+        git clone --depth=1 https://github.com/ggerganov/llama.cpp
+        cp cynpc_engine.cpp llama.cpp/
+        cp CMakeLists.txt   llama.cpp/CMakeLists_cynpc.txt
+
+    # ── 3. تثبيت Android NDK ────────────────────────────────────
+    - name: Setup Android NDK
+      uses: android-actions/setup-android@v3
+
+    - name: Install NDK
+      run: |
+        echo "y" | sdkmanager "ndk;27.0.12077973"
+        echo "NDK_PATH=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
+
+    # ── 4. بناء ARM64 ───────────────────────────────────────────
+    - name: Build ARM64
+      run: |
+        cd llama.cpp
+
+        # بناء llama.cpp نفسه أولاً
+        cmake -B build_arm64 \
+          -DCMAKE_TOOLCHAIN_FILE=${{ env.NDK_PATH }}/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=arm64-v8a \
+          -DANDROID_PLATFORM=android-26 \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLAMA_BUILD_TESTS=OFF \
+          -DLLAMA_BUILD_EXAMPLES=OFF \
+          -DGGML_NATIVE=OFF
+        cmake --build build_arm64 --config Release -j$(nproc)
+
+        # بناء cynpc-cli
+        cmake -B build_cynpc_arm64 \
+          -DCMAKE_TOOLCHAIN_FILE=${{ env.NDK_PATH }}/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=arm64-v8a \
+          -DANDROID_PLATFORM=android-26 \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLAMA_DIR=$(pwd) \
+          -f CMakeLists_cynpc.txt
+        cmake --build build_cynpc_arm64 -j$(nproc)
+
+        mkdir -p ../output/arm64-v8a
+        cp build_cynpc_arm64/cynpc-cli ../output/arm64-v8a/llama-cli
+        # نسخ المكتبات المطلوبة
+        find build_arm64 -name "*.so" -exec cp {} ../output/arm64-v8a/ \;
+
+    # ── 5. بناء ARM32 ───────────────────────────────────────────
+    - name: Build ARM32
+      run: |
+        cd llama.cpp
+
+        cmake -B build_arm32 \
+          -DCMAKE_TOOLCHAIN_FILE=${{ env.NDK_PATH }}/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=armeabi-v7a \
+          -DANDROID_PLATFORM=android-26 \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLAMA_BUILD_TESTS=OFF \
+          -DLLAMA_BUILD_EXAMPLES=OFF \
+          -DGGML_NATIVE=OFF
+        cmake --build build_arm32 --config Release -j$(nproc)
+
+        cmake -B build_cynpc_arm32 \
+          -DCMAKE_TOOLCHAIN_FILE=${{ env.NDK_PATH }}/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=armeabi-v7a \
+          -DANDROID_PLATFORM=android-26 \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLAMA_DIR=$(pwd) \
+          -f CMakeLists_cynpc.txt
+        cmake --build build_cynpc_arm32 -j$(nproc)
+
+        mkdir -p ../output/armeabi-v7a
+        cp build_cynpc_arm32/cynpc-cli ../output/armeabi-v7a/llama-cli
+        find build_arm32 -name "*.so" -exec cp {} ../output/armeabi-v7a/ \;
+
+    # ── 6. رفع النتيجة ──────────────────────────────────────────
+    - name: Upload ARM64 binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: cynpc-arm64-v8a
+        path: output/arm64-v8a/
+        retention-days: 30
+
+    - name: Upload ARM32 binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: cynpc-armeabi-v7a
+        path: output/armeabi-v7a/
+        ret
+        ention-days: 30
