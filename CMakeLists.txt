@@ -1,121 +1,72 @@
-# ╔══════════════════════════════════════════════════════════════╗
-# ║  CyNPC Engine v2.0 — CMakeLists.txt                         ║
-# ║  يبني: libcynpc.so (library) + cynpc-cli (binary)           ║
-# ╚══════════════════════════════════════════════════════════════╝
+name: Build CyNPC
 
-cmake_minimum_required(VERSION 3.22)
-project(cynpc_engine VERSION 2.0 LANGUAGES CXX)
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
 
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
 
-# ── مسار llama.cpp (عدّله حسب مشروعك) ──────────────────────────
-set(LLAMA_DIR "${CMAKE_SOURCE_DIR}/../llama.cpp"
-    CACHE PATH "مسار مجلد llama.cpp")
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
 
-# ── ARM تحسينات ──────────────────────────────────────────────────
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-    message(STATUS "🔧 ARM64 — تفعيل NEON + crypto")
-    add_compile_options(
-        -march=armv8-a+crypto+crc
-        -mtune=cortex-a55       # Snapdragon/MediaTek المنتشر
-        -O3
-        -ffast-math
-        -funroll-loops
-        -fomit-frame-pointer
-        -fvisibility=hidden
-    )
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
-    message(STATUS "🔧 ARM32 — تفعيل NEON")
-    add_compile_options(
-        -march=armv7-a
-        -mfpu=neon-vfpv4
-        -mfloat-abi=softfp
-        -O3
-        -ffast-math
-        -funroll-loops
-        -fomit-frame-pointer
-        -fvisibility=hidden
-    )
-else()
-    add_compile_options(-O2)
-endif()
+    - name: Clone llama.cpp
+      run: git clone --depth=1 https://github.com/ggerganov/llama.cpp llama
 
-# ── Link Time Optimization ────────────────────────────────────────
-include(CheckIPOSupported)
-check_ipo_supported(RESULT ipo_ok)
-if(ipo_ok)
-    message(STATUS "✅ LTO مفعّل")
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
-endif()
+    - name: Copy our engine
+      run: cp cynpc_engine.cpp llama/examples/cynpc_engine.cpp
 
-# ── llama.cpp headers + libs ──────────────────────────────────────
-include_directories(
-    ${LLAMA_DIR}/include
-    ${LLAMA_DIR}/common
-    ${LLAMA_DIR}/ggml/include
-)
+    - name: Setup NDK
+      run: |
+        wget -q https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+        unzip -q android-ndk-r27c-linux.zip
+        echo "NDK=$PWD/android-ndk-r27c" >> $GITHUB_ENV
 
-# ══════════════════════════════════════════════════════════════════
-# TARGET 1: libcynpc.so  — shared library للـ JNI
-# ══════════════════════════════════════════════════════════════════
-add_library(cynpc SHARED cynpc_engine.cpp)
+    - name: Build ARM64
+      run: |
+        cd llama
+        cmake -B build64 \
+          -DCMAKE_TOOLCHAIN_FILE=${{ env.NDK }}/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=arm64-v8a \
+          -DANDROID_PLATFORM=android-26 \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLAMA_BUILD_TESTS=OFF \
+          -DLLAMA_BUILD_EXAMPLES=ON \
+          -DGGML_NATIVE=OFF
+        cmake --build build64 -j$(nproc) --target llama-cli
+        mkdir -p ../out/arm64
+        cp build64/bin/llama-cli ../out/arm64/
+        find build64 -name "*.so" -exec cp {} ../out/arm64/ \; 2>/dev/null || true
 
-target_compile_definitions(cynpc PRIVATE CYNPC_LIBRARY_ONLY)
+    - name: Build ARM32
+      run: |
+        cd llama
+        cmake -B build32 \
+          -DCMAKE_TOOLCHAIN_FILE=${{ env.NDK }}/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=armeabi-v7a \
+          -DANDROID_PLATFORM=android-26 \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLAMA_BUILD_TESTS=OFF \
+          -DLLAMA_BUILD_EXAMPLES=ON \
+          -DGGML_NATIVE=OFF
+        cmake --build build32 -j$(nproc) --target llama-cli
+        mkdir -p ../out/arm32
+        cp build32/bin/llama-cli ../out/arm32/
+        find build32 -name "*.so" -exec cp {} ../out/arm32/ \; 2>/dev/null || true
 
-target_link_libraries(cynpc PRIVATE
-    ${LLAMA_DIR}/build/src/libllama.a
-    ${LLAMA_DIR}/build/ggml/src/libggml.a
-    ${LLAMA_DIR}/build/common/libcommon.a
-    android
-    log
-    m
-    dl
-)
+    - name: Upload ARM64
+      uses: actions/upload-artifact@v4
+      with:
+        name: llama-arm64
+        path: out/arm64/
+        retention-days: 30
 
-# شيّل الـ symbols غير الضرورية للتصغير
-target_link_options(cynpc PRIVATE
-    -Wl,--gc-sections
-    -Wl,--strip-all
-    -Wl,--exclude-libs,ALL
-)
-
-set_target_properties(cynpc PROPERTIES
-    OUTPUT_NAME     "cynpc"
-    SOVERSION       2
-    VERSION         2.0.0
-)
-
-# ══════════════════════════════════════════════════════════════════
-# TARGET 2: cynpc-cli  — binary للاختبار من Terminal
-# ══════════════════════════════════════════════════════════════════
-add_executable(cynpc-cli cynpc_engine.cpp)
-
-target_link_libraries(cynpc-cli PRIVATE
-    ${LLAMA_DIR}/build/src/libllama.a
-    ${LLAMA_DIR}/build/ggml/src/libggml.a
-    ${LLAMA_DIR}/build/common/libcommon.a
-    android
-    log
-    m
-    dl
-)
-
-target_link_options(cynpc-cli PRIVATE
-    -Wl,--gc-sections
-    -static-libstdc++      # لتشغيله بدون libc++_shared.so
-)
-
-# ══════════════════════════════════════════════════════════════════
-# Install
-# ══════════════════════════════════════════════════════════════════
-install(TARGETS cynpc cynpc-cli
-    LIBRARY DESTINATION lib
-    RUNTIME DESTINATION bin)
-
-message(STATUS "
-╔══════════════════════════════╗
-║  CyNPC Engine v2.0 Ready     ║
-║  ABI: ${CMAKE_SYSTEM_PROCESSOR}
-║  LTO: ${ipo_ok}
-╚══════════════════════════════╝")
+    - name: Upload ARM32
+      uses: actions/upload-artifact@v4
+      with:
+        name: llama-arm32
+        path: out/arm32/
+        retention-days: 30
